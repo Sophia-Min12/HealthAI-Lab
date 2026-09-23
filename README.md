@@ -36,7 +36,7 @@ This is a lab for learning the methods. Using any of it on real patients would r
 - [x] **Day 0** — Repo scaffold, CI, and curriculum roadmap
 
 **Level 1 · Biosignals**
-- [ ] **Day 1** — A synthetic ECG, and why synthetic is the honest choice
+- [x] **Day 1** — A synthetic ECG, and why synthetic is the honest choice
 - [ ] **Day 2** — Noise: baseline wander, mains hum, motion artefact
 - [ ] **Day 3** — Filtering: moving average, and what it does to the peaks
 - [ ] **Day 4** — R-peak detection and heart-rate variability
