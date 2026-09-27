@@ -39,7 +39,7 @@ This is a lab for learning the methods. Using any of it on real patients would r
 - [x] **Day 1** — A synthetic ECG, and why synthetic is the honest choice
 - [x] **Day 2** — Noise: baseline wander, mains hum, motion artefact
 - [x] **Day 3** — Filtering: moving average, and what it does to the peaks
-- [ ] **Day 4** — R-peak detection and heart-rate variability
+- [x] **Day 4** — R-peak detection and heart-rate variability
 
 **Level 2 · Risk Scoring**
 - [ ] **Day 5** — Logistic regression from scratch, and why the coefficients are readable
