@@ -44,7 +44,7 @@ This is a lab for learning the methods. Using any of it on real patients would r
 **Level 2 · Risk Scoring**
 - [x] **Day 5** — Logistic regression from scratch, and why the coefficients are readable
 - [x] **Day 6** — Beyond accuracy: sensitivity, specificity, PPV, and prevalence
-- [ ] **Day 7** — Thresholds: choosing which error you would rather make
+- [x] **Day 7** — Thresholds: choosing which error you would rather make
 - [ ] **Day 8** — Calibration: a 30% risk that is right 30% of the time
 - [ ] **Day 9** — Missing data, and the ways imputation lies
 
