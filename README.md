@@ -46,7 +46,7 @@ This is a lab for learning the methods. Using any of it on real patients would r
 - [x] **Day 6** — Beyond accuracy: sensitivity, specificity, PPV, and prevalence
 - [x] **Day 7** — Thresholds: choosing which error you would rather make
 - [x] **Day 8** — Calibration: a 30% risk that is right 30% of the time
-- [ ] **Day 9** — Missing data, and the ways imputation lies
+- [x] **Day 9** — Missing data, and the ways imputation lies
 
 **Level 3 · Clinical Text**
 - [ ] **Day 10** — De-identification: rules, recall, and the cost of a miss
