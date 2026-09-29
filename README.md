@@ -54,7 +54,7 @@ This is a lab for learning the methods. Using any of it on real patients would r
 - [x] **Day 12** — Clinical abbreviations, negation, and "no evidence of"
 
 **Level 4 · Guideline RAG**
-- [ ] **Day 13** — Indexing a clinical guideline with its section structure
+- [x] **Day 13** — Indexing a clinical guideline with its section structure
 - [ ] **Day 14** — Retrieval that must cite, and refuse when it cannot
 - [ ] **Day 15** — Measuring groundedness: every claim traced to a line
 - [ ] **Day 16** — Failure modes: out-of-scope questions and confident nonsense
