@@ -2,9 +2,11 @@
 
 ![tests](https://github.com/Sophia-Min12/HealthAI-Lab/actions/workflows/tests.yml/badge.svg)
 
-**One day, one concept, one commit — signal processing, risk scoring, de-identification, and clinical retrieval, on data that is entirely synthetic.**
+**One day, one concept, one commit — signal processing, risk scoring, de-identification, and clinical retrieval, on data that is entirely synthetic. Seventeen days, complete.**
 
 > ECG filtering and R-peak detection, logistic regression as a risk score you can read, de-identification of clinical text, and a guideline-grounded RAG demo. The domain where "the model is 94% accurate" is the beginning of the question, not the end.
+
+The pipeline runs end to end: `python 04_guideline_rag/day17_capstone/capstone.py run`. It de-identifies a note, reads the negation, retrieves a cited recommendation and verifies every claim in it — with five stages scoring between 0.65 and 0.97, and the whole thing correct on **0.493** of its notes.
 
 **Environment**: Python 3.10+ · NumPy · `pytest` as the test runner.
 
@@ -27,6 +29,12 @@ This is a lab for learning the methods. Using any of it on real patients would r
 **Say which errors you are choosing.** Every threshold trades false negatives against false positives, and in medicine those costs are wildly unequal and *directional*. A model that will not say which one it is minimising has not been specified.
 
 **Calibration is not accuracy.** A risk score that says "30%" should be right about 30% of the time. Level 2 measures that separately, because a model can rank perfectly and still be numerically useless as a probability.
+
+**A note is not partly safe.** Level 3 caught 94.9% of identifiers and left 35% of notes carrying at least one out of the door. The denominator that gets published is not the one that describes what happens when the corpus is released.
+
+**Traceable is not correct.** Level 4's answers are all quoted verbatim from the chunk they cite, and some of them quote a guideline that was withdrawn in 2019. Groundedness is the property that is easy to define, not the one anybody wants.
+
+**Every number here was measured on data this repo generated.** That is what makes the ground truth exact and what makes every figure an upper bound. Where a measurement contradicted the prose, the prose was corrected and the failed version kept as a test — there are about fifty of those.
 
 ---
 
@@ -58,7 +66,7 @@ This is a lab for learning the methods. Using any of it on real patients would r
 - [x] **Day 14** — Retrieval that must cite, and refuse when it cannot
 - [x] **Day 15** — Measuring groundedness: every claim traced to a line
 - [x] **Day 16** — Failure modes: out-of-scope questions and confident nonsense
-- [ ] **Day 17** — Capstone: the full pipeline, a CLI, and the honest writeup
+- [x] **Day 17** — Capstone: the full pipeline, a CLI, and the honest writeup
 
 ---
 
