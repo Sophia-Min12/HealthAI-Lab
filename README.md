@@ -55,7 +55,7 @@ This is a lab for learning the methods. Using any of it on real patients would r
 
 **Level 4 · Guideline RAG**
 - [x] **Day 13** — Indexing a clinical guideline with its section structure
-- [ ] **Day 14** — Retrieval that must cite, and refuse when it cannot
+- [x] **Day 14** — Retrieval that must cite, and refuse when it cannot
 - [ ] **Day 15** — Measuring groundedness: every claim traced to a line
 - [ ] **Day 16** — Failure modes: out-of-scope questions and confident nonsense
 - [ ] **Day 17** — Capstone: the full pipeline, a CLI, and the honest writeup
