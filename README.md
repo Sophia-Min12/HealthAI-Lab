@@ -50,7 +50,7 @@ This is a lab for learning the methods. Using any of it on real patients would r
 
 **Level 3 · Clinical Text**
 - [x] **Day 10** — De-identification: rules, recall, and the cost of a miss
-- [ ] **Day 11** — Evaluating de-identification when a single leak is a failure
+- [x] **Day 11** — Evaluating de-identification when a single leak is a failure
 - [ ] **Day 12** — Clinical abbreviations, negation, and "no evidence of"
 
 **Level 4 · Guideline RAG**

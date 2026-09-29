@@ -1,42 +1,43 @@
-"""Day 10 - De-identification: rules, recall, and the cost of a miss.
+"""Day 11 - Evaluating de-identification when a single leak is a failure.
 
-A corpus of synthetic clinical notes whose generator **records every
-identifier it inserts**, and a good-faith rule-based de-identifier
-measured against that record. Same discipline as Day 1's R peaks: the
-detector is scored against spans this file placed, so a miss is not a
-matter of opinion.
+Day 10 built a detector and scored it. This day asks whether the score
+meant anything, and finds four reasons to doubt it.
 
-The headline number is good and it is the wrong number. Span recall sits
-in the mid-nineties, which is roughly what published rule-based systems
-report. But a note is not partly safe. **The denominator that matters is
-the note**, and the note-level clean rate is far below the span-level
-recall, because a note needs every one of its identifiers caught.
+**The metric you pick moves the number more than the detector does.**
+Strict span matching, token matching and relaxed (any-overlap) matching
+score the same output three different ways. Relaxed matching is the one
+that flatters, and for this task it is not lenient - it is wrong. Every
+relaxed hit that is not a strict hit is a surname still on the page.
 
-Four things this file measures rather than asserts:
+**"We found no leaks" is not a rate.** Zero leaks in n notes bounds the
+leak rate at roughly 3/n, and no lower. A flawless audit of 300 notes is
+consistent with one note in a hundred leaking.
 
-* **The gazetteer cannot be finished.** Names are an open class. The
-  generator draws from a wider pool than the detector knows, which is
-  not a rigged demo - it is the permanent situation.
-* **Misses cluster.** A note written in a date format the rules do not
-  carry has two dates in that format. That makes the note-level rate
-  differ from an independence model, and the direction of the difference
-  says the errors are systematic rather than random.
-* **Over-redaction is also a failure.** ``Parkinson`` is a surname and
-  the name of a disease. Putting it in the gazetteer deletes diagnoses;
-  leaving it out leaks the patients actually called Parkinson. Both arms
-  of that trade are measured here, and neither is free.
-* **A rule evaluated on the corpus it was written for looks free.** The
-  aggressive MRN rule costs nothing measurable in this demo, and the
-  reason is that this corpus contains nothing for it to trip over. That
-  is a statement about the evaluation, not about the rule.
+**The gold standard is built by correcting the system's own output.**
+That is standard practice and it saves real annotator time, and what
+comes back is the detector plus some of its errors. Scoring against it
+inflates the note-level rate far more than the span-level one - the
+metric that matters is the metric distorted most.
+
+**And the identifiers were never the whole problem.** Age, year of
+admission, department and diagnosis all legitimately survive a perfect
+Safe Harbor de-identification, and 98% of these patients are unique on
+that tuple alone. Getting to k >= 5 means throwing away the year and the
+department, and the patients with the rarest diagnosis stay identifiable
+after everyone else is safe.
 
 NOT A MEDICAL DEVICE. Every note in this repo is invented by it. No
 patient data, real or derived, appears anywhere.
 """
 
+# --- reused from day10 ------------------------------------------------------
+
+
 from __future__ import annotations
 
+import math
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -82,11 +83,18 @@ class Span:
 
 @dataclass
 class Note:
-    """A synthetic note and the ground truth of what was put in it."""
+    """A synthetic note and the ground truth of what was put in it.
+
+    ``attributes`` is new in Day 11: the structured facts the note was
+    built from, which is what a re-identification attacker joins on.
+    Recording them draws no extra randomness, so the corpus text is
+    byte-identical to Day 10's and every number carries over.
+    """
 
     text: str
     spans: tuple = ()
     note_id: int = 0
+    attributes: dict = field(default_factory=dict)
 
     def by_category(self, category: str) -> list:
         return [s for s in self.spans if s.category == category]
@@ -114,8 +122,9 @@ class _Builder:
         self._length += len(text)
         return self
 
-    def build(self, note_id: int = 0) -> Note:
-        return Note("".join(self._parts), tuple(self._spans), note_id)
+    def build(self, note_id: int = 0, attributes: dict | None = None) -> Note:
+        return Note("".join(self._parts), tuple(self._spans), note_id,
+                    dict(attributes or {}))
 
 
 # --- the generator's pools --------------------------------------------------
@@ -235,13 +244,20 @@ def _render_phone(rng) -> str:
     return f"{area}.{mid}.{last}"
 
 
-def make_notes(n: int = 300, seed: int = 0) -> list:
+def make_notes(n: int = 300, seed: int = 0, condition_weights=None) -> list:
     """Generate ``n`` synthetic notes, each carrying its own ground truth.
 
     Every identifier is recorded as it is written, with exact offsets.
     Nothing here is derived from a real record; the templates read like
     discharge summaries and contain the shapes a de-identifier has to
     cope with.
+
+    ``condition_weights`` skews the diagnosis distribution. Left as
+    ``None`` the draw is the uniform one Day 10 used, down to the random
+    numbers consumed, so the default corpus is unchanged. Section 6
+    passes weights, because a uniform distribution of diagnoses is the
+    one case in which no diagnosis is rare - and rarity is what makes a
+    record identifiable.
     """
     rng = np.random.default_rng(seed)
     notes = []
@@ -251,7 +267,8 @@ def make_notes(n: int = 300, seed: int = 0) -> list:
         surname = str(rng.choice(SURNAMES))
         clinician = str(rng.choice(SURNAMES))
         age = int(rng.integers(24, 96))
-        condition = str(rng.choice(CONDITIONS))
+        condition = str(rng.choice(CONDITIONS) if condition_weights is None
+                        else rng.choice(CONDITIONS, p=condition_weights))
         medication = str(rng.choice(MEDICATIONS))
         department = str(rng.choice(DEPARTMENTS))
 
@@ -314,7 +331,10 @@ def make_notes(n: int = 300, seed: int = 0) -> list:
         builder.add(f"{str(rng.choice(GIVEN_NAMES))} {clinician}", "NAME")
         builder.add(f" in {department} clinic.\n")
 
-        notes.append(builder.build(note_id))
+        notes.append(builder.build(note_id, {
+            "age": age, "condition": condition, "department": department,
+            "year": year, "month": month,
+        }))
     return notes
 
 
@@ -392,16 +412,18 @@ FIELD_PATTERN = re.compile(
 WORD_PATTERN = re.compile(r"\b[A-Z][a-z]+\b")
 
 
-def detect(text: str, gazetteer=None, bare_numbers: bool = False) -> list:
+def detect(text: str, gazetteer=None, bare_numbers: bool = False,
+           unicode_names: bool = False) -> list:
     """Find identifiers in ``text``. A good-faith rule system, not a strawman.
 
     Patterns first, then title and field context, then the gazetteer. A
     later match overlapping an earlier one is dropped, so the order above
     is the precedence.
 
-    ``gazetteer`` swaps the surname list, and ``bare_numbers`` turns on
-    the aggressive MRN rule. Both exist so the demo can measure a change
-    instead of describing one.
+    ``gazetteer`` swaps the surname list, ``bare_numbers`` turns on the
+    aggressive MRN rule, and ``unicode_names`` replaces the ASCII-only
+    name patterns with the letter-aware ones below. All three exist so
+    the demo can measure a change instead of describing one.
     """
     surnames = GAZETTEER_SURNAMES if gazetteer is None else gazetteer
     found: list = []
@@ -420,13 +442,22 @@ def detect(text: str, gazetteer=None, bare_numbers: bool = False) -> list:
         for match in BARE_NUMBER_PATTERN.finditer(text):
             claim(match.start(), match.end(), "MRN")
 
-    for pattern in (TITLE_PATTERN, FIELD_PATTERN):
-        for match in pattern.finditer(text):
-            claim(match.start(1), match.end(1), "NAME")
+    if unicode_names:
+        for cue in (TITLE_CUE, FIELD_CUE):
+            for match in cue.finditer(text):
+                bounds = name_span(text, match.end())
+                if bounds is not None:
+                    claim(bounds[0], bounds[1], "NAME")
+        token_pattern = NAME_TOKEN
+    else:
+        for pattern in (TITLE_PATTERN, FIELD_PATTERN):
+            for match in pattern.finditer(text):
+                claim(match.start(1), match.end(1), "NAME")
+        token_pattern = WORD_PATTERN
 
-    for match in WORD_PATTERN.finditer(text):
+    for match in token_pattern.finditer(text):
         word = match.group()
-        if word in surnames or word in GAZETTEER_GIVEN:
+        if word[:1].isupper() and (word in surnames or word in GAZETTEER_GIVEN):
             claim(match.start(), match.end(), "NAME")
 
     found.sort(key=lambda s: s.start)
@@ -598,9 +629,247 @@ def independence_prediction(recall: float, identifiers_per_note: float) -> float
     return recall ** identifiers_per_note
 
 
+
+# --- the fix Day 10's miss list asked for ----------------------------------
+
+#: A run of letters in any script. ``[^\W\d_]`` is a word character that
+#: is neither a digit nor an underscore, and Python's ``re`` is
+#: Unicode-aware, so that is exactly the set of letters. ``[a-z]`` is the
+#: set of letters in one alphabet, and Day 10 shipped it.
+NAME_TOKEN = re.compile(r"[^\W\d_]+")
+
+#: The same cues as Day 10's TITLE_PATTERN and FIELD_PATTERN with the
+#: capture group removed - the name itself is found by ``name_span``,
+#: which can count letters that a character class cannot.
+TITLE_CUE = re.compile(
+    r"\b(?:Dr|Doctor|Mr|Mrs|Ms|Miss|Prof|Professor)\.?[ \t]+")
+FIELD_CUE = re.compile(
+    r"(?:Patient|Name|Seen by|Follow-up with|Referred by):?[ \t]+")
+
+
+def name_span(text: str, start: int, max_words: int = 2):
+    """Extend a name of up to ``max_words`` capitalised tokens from ``start``.
+
+    The capitalisation test is ``str.isupper`` on the first character
+    rather than a character class, because a character class is where
+    Day 10's bug lived. ``str`` methods know about every script; ``[A-Z]``
+    knows about one, and silently truncates at the first letter outside
+    it.
+    """
+    end = start
+    for index in range(max_words):
+        probe = end
+        if index:
+            gap = re.match(r"[ \t]+", text[end:])
+            if not gap:
+                break
+            probe = end + gap.end()
+        match = NAME_TOKEN.match(text, probe)
+        if not match or not match.group()[0].isupper():
+            break
+        end = match.end()
+    return (start, end) if end > start else None
+
+
+def detect_unicode(text: str) -> list:
+    """Day 10's rules with the ASCII assumption taken out of the name half."""
+    return detect(text, unicode_names=True)
+
+
+# --- Day 11 -----------------------------------------------------------------
+
+TOKEN_PATTERN = re.compile(r"\S+")
+
+
+def token_scores(notes, detector=detect) -> dict:
+    """Token-level recall: the metric that gives partial credit.
+
+    A PHI token is a whitespace-delimited token overlapping a truth span.
+    It counts as recovered if any prediction touches it. ``Astrid
+    Bergström`` caught as ``Astrid`` scores one of two.
+    """
+    total = found = 0
+    for note in notes:
+        predicted = detector(note.text)
+        for match in TOKEN_PATTERN.finditer(note.text):
+            token = Span(match.start(), match.end(), "TOKEN", match.group())
+            if not any(token.overlaps(truth) for truth in note.spans):
+                continue
+            total += 1
+            if any(token.overlaps(span) for span in predicted):
+                found += 1
+    return {"tokens": total, "found": found,
+            "recall": found / total if total else 0.0}
+
+
+def relaxed_scores(notes, detector=detect) -> dict:
+    """Span recall where *any* overlap counts as a hit.
+
+    Reported in the literature as "relaxed" or "partial" match, and for
+    this task it is not a lenient metric - it is a wrong one. Every
+    relaxed hit that is not a strict hit is a span with text still on the
+    page.
+    """
+    total = found = 0
+    for note in notes:
+        predicted = detector(note.text)
+        for truth in note.spans:
+            total += 1
+            if any(truth.overlaps(span) for span in predicted):
+                found += 1
+    return {"spans": total, "found": found,
+            "recall": found / total if total else 0.0}
+
+
+# --- how sure can you be that nothing leaked? -------------------------------
+
+
+def binomial_cdf(k: int, n: int, p: float) -> float:
+    """``P(X <= k)`` for ``X ~ Binomial(n, p)``, summed directly."""
+    if p <= 0.0:
+        return 1.0
+    if p >= 1.0:
+        return 1.0 if k >= n else 0.0
+    return sum(math.comb(n, i) * p ** i * (1 - p) ** (n - i)
+               for i in range(k + 1))
+
+
+def leak_rate_upper_bound(leaks: int, n: int, confidence: float = 0.95) -> float:
+    """Clopper-Pearson upper bound on the leak rate, by bisection.
+
+    The honest way to report "we found no leaks". Zero leaks in ``n``
+    notes does not mean the rate is zero; it means the rate is below
+    whatever this returns.
+    """
+    if n <= 0:
+        raise ValueError("n must be positive")
+    if not 0 <= leaks <= n:
+        raise ValueError(f"leaks must be in [0, {n}], got {leaks}")
+    if leaks >= n:
+        return 1.0
+    alpha = 1.0 - confidence
+    low, high = 0.0, 1.0
+    for _ in range(200):
+        mid = (low + high) / 2.0
+        if binomial_cdf(leaks, n, mid) > alpha:
+            low = mid
+        else:
+            high = mid
+    return high
+
+
+def rule_of_three(n: int) -> float:
+    """``3 / n`` - the approximation worth carrying in your head.
+
+    Exact for zero events is ``1 - alpha ** (1 / n)``; this is within a
+    percent of it for any n worth running, which a test pins.
+    """
+    if n <= 0:
+        raise ValueError("n must be positive")
+    return 3.0 / n
+
+
+# --- the evaluation set is annotated by people holding the rules ------------
+
+
+def anchored_gold(notes, detector=detect, catch_probability: float = 0.5,
+                  seed: int = 0) -> list:
+    """A gold standard built by correcting the system's own output.
+
+    Standard practice, and it saves real annotator time: run the rules,
+    hand a human the pre-annotated text, ask them to fix it. The human
+    finds each genuine miss with probability ``catch_probability`` -
+    anchoring, fatigue, and the fact that an unmarked span in a marked
+    document does not draw the eye.
+
+    What comes back is not ground truth. It is the detector's output plus
+    some of its errors, and scoring the detector against it is scoring it
+    against a blurred copy of itself.
+    """
+    rng = np.random.default_rng(seed)
+    gold = []
+    for note in notes:
+        predicted = detector(note.text)
+        kept = tuple(truth for truth in note.spans
+                     if covered(truth, predicted)
+                     or rng.random() < catch_probability)
+        gold.append(Note(note.text, kept, note.note_id))
+    return gold
+
+
+# --- what survives de-identification ----------------------------------------
+
+#: Age is redacted only above 89, the year of an event may be retained,
+#: and the department and the diagnosis are the clinical content - the
+#: whole reason the note was released. Every one of these is legitimately
+#: still there after a perfect Safe Harbor de-identification.
+GENERALISATIONS = (
+    ("age, year, dept, diagnosis", ("age", "year", "department", "condition")),
+    ("age band, year, dept, diagnosis", ("band", "year", "department", "condition")),
+    ("age band, year, diagnosis", ("band", "year", "condition")),
+    ("age band, diagnosis", ("band", "condition")),
+    ("diagnosis only", ("condition",)),
+)
+
+
+def quasi_identifier(note, fields) -> tuple:
+    """The tuple an attacker joins on, from a note's retained attributes."""
+    attributes = dict(note.attributes)
+    attributes["band"] = (attributes["age"] // 10) * 10
+    return tuple(attributes[field] for field in fields)
+
+
+def k_anonymity(notes, fields) -> dict:
+    """Equivalence-class sizes for one choice of retained fields.
+
+    ``k`` is the size of the smallest class: the number of people an
+    attacker cannot tell apart. ``k = 1`` means a record is alone in its
+    class and the join is unambiguous.
+    """
+    classes = Counter(quasi_identifier(note, fields) for note in notes)
+    sizes = sorted(classes.values())
+    unique = sum(1 for note in notes
+                 if classes[quasi_identifier(note, fields)] == 1)
+    return {
+        "classes": len(classes),
+        "k": sizes[0],
+        "median_class": sizes[len(sizes) // 2],
+        "unique": unique,
+        "unique_rate": unique / len(notes) if notes else 0.0,
+    }
+
+
+def uniqueness_by_condition(notes, fields) -> list:
+    """Who is identifiable, broken down by how common their diagnosis is.
+
+    The averaged uniqueness rate is the wrong summary for the same reason
+    Day 6's accuracy was: it is dominated by the common cases, and the
+    rare ones are the ones at risk.
+    """
+    classes = Counter(quasi_identifier(note, fields) for note in notes)
+    frequency = Counter(note.attributes["condition"] for note in notes)
+    per_condition = {}
+    for note in notes:
+        condition = note.attributes["condition"]
+        bucket = per_condition.setdefault(condition, [0, 0])
+        bucket[0] += 1
+        if classes[quasi_identifier(note, fields)] == 1:
+            bucket[1] += 1
+    return sorted(
+        ({"condition": condition, "patients": frequency[condition],
+          "unique": found, "rate": found / total}
+         for condition, (total, found) in per_condition.items()),
+        key=lambda row: row["patients"],
+    )
+
+
+#: A diagnosis distribution with a tail, for section 6. Real cohorts are
+#: never uniform, and the tail is the part that matters.
+SKEWED_CONDITIONS = (0.30, 0.22, 0.16, 0.12, 0.09, 0.06, 0.035, 0.015)
+
+
 if __name__ == "__main__":
     import sys
-    from collections import Counter
 
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -610,195 +879,184 @@ if __name__ == "__main__":
     print("NOT A MEDICAL DEVICE. Every note here is invented by this file.")
 
     notes = make_notes(n=300, seed=0)
-    identifiers = sum(len(note.spans) for note in notes)
-    per_note = identifiers / len(notes)
+    strict = evaluate(notes)
     print()
-    print(f"corpus {len(notes)} notes, {identifiers} identifiers, "
-          f"{per_note:.1f} per note")
+    print(f"corpus {len(notes)} notes, {strict.total_truth} identifiers")
+    print(f"Day 10's detector, unchanged: strict recall {strict.recall:.3f}, "
+          f"{strict.clean_notes}/{strict.n_notes} notes clean")
 
     print()
     print("=" * 74)
-    print("1. one note, before and after")
+    print("1. one output, three metrics, three numbers")
     print("=" * 74)
-    sample = notes[1]
-    for line in sample.text.rstrip().splitlines():
-        print(f"  | {line}")
+    token = token_scores(notes)
+    relaxed = relaxed_scores(notes)
+    print(f"  {'metric':<34}{'denominator':>13}{'recall':>9}")
+    print(f"  {'token, any overlap':<34}{token['tokens']:>13}"
+          f"{token['recall']:>9.3f}")
+    print(f"  {'span, any overlap (relaxed)':<34}{relaxed['spans']:>13}"
+          f"{relaxed['recall']:>9.3f}")
+    print(f"  {'span, fully covered (strict)':<34}{strict.total_truth:>13}"
+          f"{strict.recall:>9.3f}")
     print()
-    print("  redacted:")
-    for line in redact(sample.text, detect(sample.text)).rstrip().splitlines():
-        print(f"  | {line}")
+    print("  the detector did not change between those rows. Nothing about")
+    print("  the system moved; only the question moved.")
 
     print()
     print("=" * 74)
-    print("2. the headline number, and the one that matters")
+    print("2. partial credit, for a task where there is no such thing")
     print("=" * 74)
-    result = evaluate(notes)
-    print(f"  {'category':<12}{'in corpus':>11}{'caught':>9}{'recall':>9}")
-    for category in CATEGORIES:
-        row = result.per_category[category]
-        if not row["truth"]:
-            continue
-        print(f"  {category:<12}{row['truth']:>11}{row['found']:>9}"
-              f"{row['recall']:>9.3f}")
-    print(f"  {'ALL':<12}{result.total_truth:>11}"
-          f"{result.total_truth - result.total_missed:>9}{result.recall:>9.3f}")
-    print()
-    print(f"  span recall                {result.recall:.3f}")
-    print(f"  span precision             {result.precision:.3f}")
-    print(f"  notes fully de-identified  {result.clean_notes}/{result.n_notes}"
-          f" = {result.clean_rate:.3f}")
-    print()
-    print("  a note is not partly safe. The span figure is the one that gets")
-    print("  published; the note figure describes what happens when the")
-    print("  corpus is released.")
-
-    print()
-    print("=" * 74)
-    print("3. misses are not spread evenly")
-    print("=" * 74)
-    leaking = Counter(note_id for note_id, _ in result.misses)
-    by_category = Counter(span.category for _, span in result.misses)
-    print(f"  {result.total_missed} misses, in {len(leaking)} notes")
-    print()
-    print(f"  {'category':<12}{'misses':>9}    {'misses in a note':<20}{'notes':>8}")
-    rows = list(by_category.most_common())
-    spread = sorted(Counter(leaking.values()).items())
-    for i in range(max(len(rows), len(spread))):
-        left = f"  {rows[i][0]:<12}{rows[i][1]:>9}" if i < len(rows) else " " * 23
-        right = (f"    {spread[i][0]:<20}{spread[i][1]:>8}"
-                 if i < len(spread) else "")
-        print(left + right)
-    print()
-    predicted_clean = independence_prediction(result.recall, per_note)
-    print(f"  independence model  {result.recall:.3f}^{per_note:.1f} = "
-          f"{predicted_clean:.3f}")
-    print(f"  measured                          {result.clean_rate:.3f}")
-    print()
-    print("  the two disagree, and the direction is the point: misses")
-    print("  concentrate in the same notes, so the number of notes affected")
-    print("  is not what independent errors would give. A systematic failure")
-    print("  is the kind a larger corpus does not average away.")
-
-    print()
-    print("=" * 74)
-    print("4. what was missed, and why it was always going to be")
-    print("=" * 74)
-    shown = Counter()
-    for note_id, span in result.misses:
-        if shown[span.category] >= 3:
-            continue
-        shown[span.category] += 1
-        print(f"  {span.category:<8} {span.text!r}")
-    print()
-    print("  the DATE misses are one format the pattern list does not carry.")
-    print("  It is rare in this corpus for the same reason it would be rare")
-    print("  in a development sample - and that is exactly why the rules do")
-    print("  not have it. The list is always one hospital behind.")
-    print()
-    print("  the MRN misses are bare numbers with no label. Section 6 turns")
-    print("  on the rule that catches them.")
-    print()
     partials = partial_matches(notes)
-    truncated = {truth.text for _, truth, _ in partials}
-    name_misses = [truth for _, truth in result.misses if truth.category == "NAME"]
-    from_truncation = sum(1 for t in name_misses if t.text in truncated)
-    print(f"  the NAME misses split in two. {len(name_misses) - from_truncation}"
-          f" are people not in the gazetteer,")
-    print("  mentioned with no title and no field label in front of them.")
-    print("  That one is not fixable by adding names: a list is a snapshot of")
-    print("  a population, and the next patient is under no obligation to")
-    print("  appear in it.")
+    print("  spans counted as hits by relaxed matching and missed by")
+    print(f"  strict matching: {len(partials)}")
     print()
-    print(f"  the other {from_truncation} are a bug, and it took a miss list "
-          f"to find it:")
-    for _note_id, truth, leftover in partials[:3]:
-        print(f"    {truth.text!r}  ->  redacted, leaving {leftover!r}")
+    print(f"  {'truth':<28}{'what survives redaction':<28}")
+    for _note_id, truth, leftover in partials[:6]:
+        print(f"  {truth.text:<28}{leftover.strip():<28}")
     print()
-    print("  every character class in this file is written [a-z], which is")
-    print("  ASCII. The name pattern stops at the first letter with a")
-    print("  diacritic, so the rule fires, covers most of the name, and")
-    print("  leaves the distinctive part behind. This is worse than missing")
-    print("  the name outright: the redaction marker says the name was")
-    print("  handled, and the recall table counts it as a failure without")
-    print("  ever saying it is a different kind of failure.")
+    print("  every one of those is a relaxed-match success with a leak in it.")
+    print("  Day 10 found the cause by reading its own miss list: the name")
+    print("  patterns are written [a-z], which is ASCII, so they stop at the")
+    print("  first letter carrying a diacritic. The rule fires, the redaction")
+    print("  marker goes in, and the distinctive part of the name stays.")
     print()
-    print("  Day 11 measures what it costs to fix, and why the metric most")
-    print("  commonly reported could not see it at all.")
-
+    print("  relaxed matching is reported as the lenient metric. For this")
+    print("  task it is not lenient, it is wrong: it scores a leak as a hit.")
     print()
-    print("=" * 74)
-    print("5. the other kind of failure, and the trade it forces")
-    print("=" * 74)
-    print(f"  {'gazetteer':<26}{'recall':>8}{'precision':>11}"
-          f"{'clean':>8}{'eponyms lost':>14}")
-    for label, detector in (("with eponym surnames", detect),
-                            ("without them", detect_without_eponyms)):
+    print("  so fix it - [^\\W\\d_] is a letter in any script - and watch what")
+    print("  each metric says the fix was worth:")
+    print()
+    print(f"  {'name patterns':<20}{'strict':>9}{'relaxed':>9}{'token':>9}"
+          f"{'clean':>9}{'partials':>10}")
+    for label, detector in (("ASCII, as shipped", detect),
+                            ("letter-aware", detect_unicode)):
         scored = evaluate(notes, detector)
-        damage = over_redaction(notes, detector)
-        print(f"  {label:<26}{scored.recall:>8.3f}{scored.precision:>11.3f}"
-              f"{scored.clean_rate:>8.3f}"
-              f"{damage['damaged']:>8}/{damage['phrases']:<5}")
+        print(f"  {label:<20}{scored.recall:>9.4f}"
+              f"{relaxed_scores(notes, detector)['recall']:>9.4f}"
+              f"{token_scores(notes, detector)['recall']:>9.4f}"
+              f"{scored.clean_rate:>9.3f}"
+              f"{len(partial_matches(notes, detector)):>10}")
     print()
-    damage = over_redaction(notes)
-    for note_id, phrase in damage["examples"]:
-        print(f"    note {note_id}: {phrase!r} redacted")
+    print("  the relaxed and token columns are identical to four decimal")
+    print("  places. Not close - identical. Both were already counting those")
+    print("  spans as hits, so neither can register a repair to them.")
     print()
-    print("  Parkinson is a surname and Parkinson's disease is a diagnosis,")
-    print("  and the difference is not in the word. Keep the eponyms on the")
-    print("  list and diagnoses are deleted; strike them off and the patients")
-    print("  actually called Parkinson walk out of the building named.")
-    print()
-    print("  neither column is the safe one. The first loses clinical")
-    print("  meaning while every number in section 2 stays clean, and the")
-    print("  second is a leak. This is the trade, not a bug to be fixed.")
+    print("  and strict recall after the fix is exactly the relaxed figure")
+    print("  from before it. That is what relaxed matching was reporting all")
+    print("  along: the score the system would get once its leaks were")
+    print("  fixed, presented as the score it had.")
 
     print()
     print("=" * 74)
-    print("6. a rule that looks free, and the reason it looks free")
+    print("3. 'we found no leaks' is not a rate")
     print("=" * 74)
-    print(f"  {'rules':<30}{'recall':>8}{'precision':>11}{'clean':>8}")
-    for label, detector in (("conservative", detect),
-                            ("plus bare 6-8 digit numbers", detect_aggressive)):
-        scored = evaluate(notes, detector)
-        print(f"  {label:<30}{scored.recall:>8.3f}{scored.precision:>11.3f}"
-              f"{scored.clean_rate:>8.3f}")
+    print(f"  {'notes audited':>15}{'leaks found':>13}{'95% upper bound':>18}"
+          f"{'3/n':>9}")
+    for n in (30, 100, 300, 1000, 10000):
+        bound = leak_rate_upper_bound(0, n)
+        print(f"  {n:>15}{0:>13}{bound:>18.4f}{rule_of_three(n):>9.4f}")
     print()
-    aggressive = evaluate(notes, detect_aggressive)
-    print(f"  the aggressive rule costs {len(aggressive.false_positives) - len(result.false_positives)}"
-          f" additional false positives here.")
+    print("  a flawless audit of 300 notes is consistent with 1 note in 100")
+    print("  leaking. To bound the rate below 1 in 1000 you must audit three")
+    print("  thousand notes and find nothing in any of them.")
     print()
-    print("  that is not evidence the rule is safe. This corpus contains no")
-    print("  six-to-eight-digit number that is not an MRN - no accession")
-    print("  numbers, no device serials, no pager IDs - so there is nothing")
-    print("  for the rule to trip over. A rule evaluated on the corpus it")
-    print("  was written for always looks free.")
-    print()
-    print("  the honest statement is not 'this rule is safe'. It is 'this")
-    print("  corpus cannot tell you whether this rule is safe', and the")
-    print("  difference between those two sentences is Day 11.")
+    leaking = len({note_id for note_id, _ in strict.misses})
+    print(f"  and this detector did not find nothing. {leaking} of "
+          f"{len(notes)} notes leaked:")
+    print(f"    point estimate     {leaking / len(notes):.3f}")
+    print(f"    95% upper bound    {leak_rate_upper_bound(leaking, len(notes)):.3f}")
 
     print()
     print("=" * 74)
-    print("7. the cost of a miss")
+    print("4. the gold standard is built by correcting the system's output")
     print("=" * 74)
-    print(f"  {result.recall:.1%} span recall sounds like a "
-          f"{1 - result.recall:.0%} problem.")
-    print(f"  It is a {1 - result.clean_rate:.0%} problem: {len(leaking)} of "
-          f"{len(notes)} notes carry at least one identifier out of the door.")
+    print("  run the rules, hand a human the pre-annotated text, ask them to")
+    print("  fix it. It saves real annotator time. The human catches each")
+    print("  genuine miss with probability p - anchoring, fatigue, and the")
+    print("  fact that an unmarked span in a marked document does not draw")
+    print("  the eye.")
     print()
-    print("  Day 7 chose a threshold from a cost ratio. The arithmetic still")
-    print("  applies and the ratio is not 5:1. A false positive costs a word")
-    print("  of clinical text; a false negative costs a person their medical")
-    print("  privacy, permanently, in a corpus that has already been copied.")
-    print("  There is no ratio at which a leak is priced acceptably, which is")
-    print("  why de-identification is not a threshold-tuning problem.")
+    print(f"  {'gold standard':<30}{'recall':>9}{'clean rate':>13}")
+    print(f"  {'true (the generator record)':<30}{strict.recall:>9.3f}"
+          f"{strict.clean_rate:>13.3f}")
+    for probability in (0.75, 0.5, 0.25):
+        gold = anchored_gold(notes, catch_probability=probability, seed=1)
+        scored = evaluate(gold)
+        label = f"annotator catches {probability:.0%}"
+        print(f"  {label:<30}{scored.recall:>9.3f}{scored.clean_rate:>13.3f}")
     print()
-    print("  what is out of scope here, stated rather than hidden:")
-    for name, why in SAFE_HARBOR_GAPS.items():
-        print(f"    {name:<24} {why}")
+    print("  the span recall barely moves and the clean rate moves a great")
+    print("  deal, and that is the shape of the problem: the misses the")
+    print("  annotator failed to catch simply stop existing, and a note with")
+    print("  one uncaught miss is recorded as a clean note.")
+    print()
+    print("  the metric that matters is the metric this distorts most.")
 
     print()
-    print("  Day 11 asks how you would know any of this. Every number above")
-    print("  was scored against ground truth this file wrote down. A real")
-    print("  corpus has no such record, and its evaluation set is annotated")
-    print("  by people holding the rules that are being tested.")
+    print("=" * 74)
+    print("5. and the identifiers were never the whole problem")
+    print("=" * 74)
+    print("  suppose Day 10's detector were perfect. Every name, MRN, date,")
+    print("  phone, address and email is gone. What is left in the note is")
+    print("  the age (redacted only above 89), the year, the department and")
+    print("  the diagnosis - all of it legitimately retained, all of it the")
+    print("  reason the note was released at all.")
+    print()
+    print(f"  {'retained fields':<36}{'classes':>9}{'k':>4}{'unique':>9}")
+    for label, fields in GENERALISATIONS:
+        row = k_anonymity(notes, fields)
+        print(f"  {label:<36}{row['classes']:>9}{row['k']:>4}"
+              f"{row['unique_rate']:>9.1%}")
+    print()
+    print("  98% of these patients are alone in their equivalence class on")
+    print("  the first row. An attacker holding an age, a year, a department")
+    print("  and a diagnosis - an obituary, a social media post, a colleague")
+    print("  with a memory - joins straight onto the record.")
+    print()
+    print("  getting the unique rate near zero costs the year and the")
+    print("  department. That is not a tuning knob, it is the deletion of")
+    print("  most of what a researcher wanted the corpus for.")
+
+    print()
+    print("=" * 74)
+    print("6. and the average hides who is at risk")
+    print("=" * 74)
+    skewed = make_notes(n=300, seed=0, condition_weights=SKEWED_CONDITIONS)
+    fields = ("band", "year", "condition")
+    overall = k_anonymity(skewed, fields)
+    print(f"  fields: age band, year, diagnosis. Overall unique "
+          f"{overall['unique_rate']:.1%}")
+    print()
+    print(f"  {'diagnosis':<40}{'patients':>9}{'unique':>9}")
+    for row in uniqueness_by_condition(skewed, fields):
+        print(f"  {row['condition']:<40}{row['patients']:>9}"
+              f"{row['rate']:>9.1%}")
+    print()
+    print("  the overall figure is an average over a population most of whom")
+    print("  are safe. The patients with the rarest diagnosis are the ones")
+    print("  the join lands on, and a rare diagnosis is what makes a record")
+    print("  worth looking for in the first place.")
+    print()
+    print("  Day 6 said accuracy measures prevalence. This is the same")
+    print("  sentence: a privacy metric averaged over a cohort measures the")
+    print("  common cases, and the rare ones are the exposure.")
+
+    print()
+    print("=" * 74)
+    print("what to report, and what it costs to say it")
+    print("=" * 74)
+    print("  not 'recall 0.98'. Three numbers, none of them flattering:")
+    print()
+    print(f"    leak rate per note   {leaking / len(notes):.3f} "
+          f"(95% upper bound {leak_rate_upper_bound(leaking, len(notes)):.3f})")
+    print(f"    strict span recall   {strict.recall:.3f}, against ground truth")
+    print("                         that is not a corrected system output")
+    unique_rate = k_anonymity(notes, GENERALISATIONS[0][1])["unique_rate"]
+    print(f"    unique on retained   {unique_rate:.1%}")
+    print("                         quasi-identifiers")
+    print()
+    print("  Day 12 stays in the text and changes the question. Nothing")
+    print("  below is about identity: the problem is that a note saying")
+    print("  'no evidence of pneumonia' contains the word pneumonia, and a")
+    print("  system reading it as a diagnosis is wrong in the direction that")
+    print("  puts a patient on a treatment.")

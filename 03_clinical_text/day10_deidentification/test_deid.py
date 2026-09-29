@@ -21,6 +21,7 @@ from deid import (
     independence_prediction,
     make_notes,
     over_redaction,
+    partial_matches,
     redact,
 )
 
@@ -143,6 +144,28 @@ class TestTheDetector(unittest.TestCase):
         spans = detect(f"seen by Dr {unknown} today")
         self.assertTrue(any(s.category == "NAME" and unknown in s.text
                             for s in spans))
+
+    def test_an_ascii_character_class_truncates_a_name_with_a_diacritic(self):
+        # Found by reading the miss list, not by reading the code. Every
+        # class in the module is [a-z]; the pattern stops at the first
+        # letter outside ASCII, so the rule fires, redacts most of the
+        # name and leaves the distinctive part on the page.
+        spans = detect("Patient: Astrid Bergström   MRN 1234567")
+        names = [s for s in spans if s.category == "NAME"]
+        self.assertEqual(len(names), 1)
+        self.assertEqual(names[0].text, "Astrid Bergstr")
+
+    def test_and_that_leaves_the_tail_of_the_name_in_the_output(self):
+        text = "Patient: Astrid Bergström   MRN 1234567"
+        self.assertIn("öm", redact(text, detect(text)))
+
+    def test_it_is_about_half_the_name_failures_in_the_corpus(self):
+        partials = partial_matches(NOTES)
+        truncated = {truth.text for _, truth, _ in partials}
+        name_misses = [t for _, t in RESULT.misses if t.category == "NAME"]
+        from_truncation = sum(1 for t in name_misses if t.text in truncated)
+        self.assertGreater(from_truncation, 0.4 * len(name_misses))
+        self.assertTrue(all(left == "öm" for _, _, left in partials))
 
     def test_an_uncued_unknown_surname_is_missed(self):
         # Not a defect to be fixed - the open-class problem. There is no

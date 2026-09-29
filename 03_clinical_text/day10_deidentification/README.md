@@ -74,7 +74,29 @@ NAME     'Hodgkin'
 
 - **The date misses** are one format the pattern list does not carry. It is rare in this corpus for exactly the reason it would be rare in a development sample — and that is *why* the rules do not have it. The list is always one hospital behind.
 - **The MRN misses** are bare numbers with no label. A seven-digit run in free text is indistinguishable from an accession number without reading the sentence.
-- **The name misses** are people not in the gazetteer, mentioned with no title and no field label in front of them. This one is not fixable by adding names. Names are an open class; a list is a snapshot of a population, and the next patient is under no obligation to appear in it.
+- **The name misses split in two**, and only one half is the open-class problem.
+
+### 29 of them are the gazetteer
+
+People not on the list, mentioned with no title and no field label in front of them. This half is not fixable by adding names. Names are an open class; a list is a snapshot of a population, and the next patient is under no obligation to appear in it.
+
+### 28 of them are a bug, and it took a miss list to find it
+
+```
+'Bergström'         ->  redacted, leaving 'öm'
+'Astrid Bergström'  ->  redacted, leaving 'öm'
+'Lucia Bergström'   ->  redacted, leaving 'öm'
+```
+
+Every character class in the module is written `[a-z]`, which is ASCII. The name pattern **stops at the first letter with a diacritic**, so the rule fires, covers most of the name, and leaves the distinctive part on the page:
+
+```
+Patient: [NAME]öm
+```
+
+This is worse than missing the name outright. The redaction marker asserts the name was handled. The recall table counts it as a failure without ever saying it is a *different kind* of failure — and the metric most commonly reported in the literature cannot see it at all, which is Day 11's first section.
+
+Nothing in the code review found this. Reading the list of what was missed found it.
 
 ## The other kind of failure, and the trade it forces
 
